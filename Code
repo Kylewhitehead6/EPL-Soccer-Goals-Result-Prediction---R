@@ -1,0 +1,951 @@
+#read in data
+#projectdata <- read.csv("~/Desktop/SFU classes/Stat 310/project /Original Project Data - Stat 310.csv")
+#View(projectdata)
+
+#used packages
+#install.packages("zoo")
+library("zoo")
+library("dplyr")
+library("plyr")
+library("ggplot2")
+library("rpart")
+library("rpart.plot")
+
+#Exploratory Analysis
+#Try using different plots to highlight interesting features of the data. 
+
+#get average goals at home of each team
+aggregate(projectdata$FTHG, by=list(projectdata$HomeTeam), FUN=mean)
+aggregate(projectdata$FTAG, by=list(projectdata$AwayTeam), FUN=mean)
+homegoals = aggregate(projectdata$FTHG, by=list(projectdata$HomeTeam), FUN=mean)
+awaygoals = aggregate(projectdata$FTAG, by=list(projectdata$AwayTeam), FUN=mean)
+
+par(mar=c(8, 4.1, 4.1, 2.1))
+barplot(with(homegoals, setNames(x, Group.1)), main = "Average Home Goals per game by Team ",
+        ylab = "Average Goals", las = 2, col = rainbow (20))
+barplot(with(awaygoals, setNames(x, Group.1)), main = "Average Away Goals per game by Team ",
+        ylab = "Average Goals", las = 2, col = rainbow(20), ylim = c(0,2))
+
+
+##Boxplot of average goals
+homegoals_boxplot = boxplot(aggregate(projectdata$FTHG, by=list(projectdata$HomeTeam), FUN=mean) [2], col = "purple", main = "Plot of Average Goals Scored of Each Home Team", ylab = "Average Goals") ## label the outliers? 
+awaygoals_boxplot = boxplot(aggregate(projectdata$FTAG, by=list(projectdata$AwayTeam), FUN=mean) [2], col = "orange", main = "Plot of Average Goals Scored of Each Away Team", ylab = "Average Goals")
+
+## total goals scored at home and away
+hist(projectdata$FTHG, col = "green", xlab = "Goals Scored", main = "Goals Scored for Home Teams", breaks = 10, xlim = c(-1,9))
+hist(projectdata$FTAG, col = "blue", xlab = "Goals Scored", main = "Goals Scored for Away Teams", breaks = 5)
+
+#print(unique(projectdata$FTAG))
+##density plot of full time away and home goals
+plot(density(projectdata[,"FTHG"]))
+plot(density(projectdata[,"FTAG"]))
+
+
+#Data Cleaning and Manipulation
+G = nrow(projectdata)
+G
+projectdata$season[1:380] = "09/10"
+projectdata$season[381:760] = "10/11"
+projectdata$season[761:1140] = "11/12"
+projectdata$season[1141:1520] = "12/13"
+projectdata$season[1521:1900] = "13/14"
+projectdata$season[1901:2280] = "14/15"
+projectdata$season[2281:2660] = "15/16"
+projectdata$season[2661:3040] = "16/17"
+projectdata$season[3041:3420] = "17/18"
+projectdata$season[3421:3800] = "18/19"
+
+## Convert to UTC Time 
+
+projectdata$UtcDate <- 0
+#the first 380 observations are in the "%Y-%m-%d" format.
+projectdata$UtcDate[c(1:380)] <- sapply(as.character(projectdata$Date)[c(1:380)],
+                                       function(x){
+                                         as.numeric(as.POSIXct(as.character(x), format="%Y-%m-%d"))
+                                       })
+#the remaining observations in rows 381 to 3420 are in the "%d/%m/%y" format
+##      note the lowercase y - this is the year without the century
+projectdata$UtcDate[c(381:3420)] <- sapply(as.character(projectdata$Date)[c(381:3420)],
+                                          function(x){
+                                            as.numeric(as.POSIXct(as.character(x), format="%d/%m/%y"))
+                                          })
+## the remaining observations in rows 3421 to 3800 are in the "%d/%m/%Y" format
+
+projectdata$UtcDate[c(3421:3800)] <- sapply(as.character(projectdata$Date)[c(3421:3800)],
+  function(x){
+    as.numeric(as.POSIXct(as.character(x), format="%d/%m/%Y"))
+   })
+
+## identify the set of teams in the data
+myteams <- as.character(sort(unique(projectdata[,"HomeTeam"])))
+### HomeTeam top 6 & Away team top 6
+myteams
+top6inds = which(myteams %in% c("Liverpool", "Arsenal", "Man United", "Man City", "Chelsea", "Tottenham"))
+projectdata$HTop6 = ifelse(projectdata$HomeTeam %in% c("Liverpool", "Arsenal", "Man United", "Man City", "Chelsea", "Tottenham"), 1, 0)
+projectdata$ATop6 = ifelse(projectdata$AwayTeam %in% c("Liverpool", "Arsenal", "Man United", "Man City", "Chelsea", "Tottenham"), 1, 0)
+
+
+### take the average FTHG of previous 5 games and computes an average for the new column HLast5GamesGoals
+### lag is so that the 6th row is the first row to show the calcualtion, otherwise it would include the row itself 
+##  I'm going to create a list that holds the goals scored for each team at home
+## loop through the teams and create a list. Each element of the list is a matrix with three columns
+## holding the utc time, the number of goals scored and a binary variable indicating whether the game was
+## played at home or away
+## create an empty list
+## each element of this list will be a matrix
+
+### Home Goals
+team_goals <- vector(mode = "list",length=length(myteams))
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTHG")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,HomeGame = rep(1,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTAG")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,HomeGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+team_goals
+
+## This has not been written for maximial efficiency.  Instead, it is written for clarity.
+##initialize the column with zeros
+projectdata$HLast5GamesGoals = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_goals[[home_team]][,"UtcDate"] < current_date &
+                   team_goals[[home_team]][,"HomeGame"] == 1)
+  
+  ## if the length of hinds is greater than or equal to 5, compute the mean.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HLast5GamesGoals"] <- mean(tail(team_goals[[home_team]][hinds,"Goals"],5))
+  }
+  else{
+    projectdata[g,"HLast5GamesGoals"] <- NA
+  }
+}
+
+
+###Away Goals
+
+for (tt in c(1:length(myteams))){
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTAG")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,AwayGame = rep(1,length(inds)))
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTHG")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,AwayGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+#team_goals
+
+projectdata$ALast5GamesGoals = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for away games played before the current date
+  ainds <- which(team_goals[[away_team]][,"UtcDate"] < current_date &
+                   team_goals[[away_team]][,"AwayGame"] == 1)
+  
+  ## if the length of hinds is greater than or equal to 5, compute the mean.  Otherwise use NA
+  if(length(ainds) >= 5){
+    projectdata[g,"ALast5GamesGoals"] <- mean(tail(team_goals[[away_team]][ainds,"Goals"],5))
+  }
+  else{
+    projectdata[g,"ALast5GamesGoals"] <- NA
+  }
+}
+
+### Home Goals Against Specific Team 
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTHG", "HomeTeam", "AwayTeam")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,HomeGame = rep(1,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTAG", "HomeTeam", "AwayTeam")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,HomeGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+projectdata$HLast3GamesGoalsVSOpposition = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last 3 home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  away_team = match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for matches played before the current date
+  minds <- which(team_goals[[home_team]][,"UtcDate"] < current_date &
+                   team_goals[[home_team]][,"HomeGame"] == 1  & 
+                   team_goals[[home_team]][, "HomeTeam"] == myteams[home_team] &  
+                   team_goals[[home_team]][, "AwayTeam"] == myteams[away_team])
+  
+  ## if the length of hinds is greater than or equal to 3, compute the mean.  Otherwise use NA
+  if(length(minds) >= 3){
+    projectdata[g,"HLast3GamesGoalsVSOpposition"] <- mean(tail(team_goals[[home_team]][minds,"Goals"],3))
+  }
+  else{
+    projectdata[g,"HLast3GamesGoalsVSOpposition"] <- NA
+  }
+}
+
+
+#### Away Team goals last 3 games against specific opposition 
+for (tt in c(1:length(myteams))){
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTAG", "HomeTeam", "AwayTeam")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,AwayGame = rep(1,length(inds)))
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTHG", "HomeTeam", "AwayTeam")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,AwayGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+
+projectdata$ALast3GamesGoalsVSOpposition = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last 3 home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  away_team = match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for matches played before the current date
+  minds <- which(team_goals[[away_team]][,"UtcDate"] < current_date &
+                   team_goals[[away_team]][,"AwayGame"] == 1  & 
+                   team_goals[[away_team]][, "HomeTeam"] == myteams[home_team] &  
+                   team_goals[[away_team]][, "AwayTeam"] == myteams[away_team])
+  
+  ## if the length of hinds is greater than or equal to 3, compute the mean.  Otherwise use NA
+  if(length(minds) >= 3){
+    projectdata[g,"ALast3GamesGoalsVSOpposition"] <- mean(tail(team_goals[[away_team]][minds,"Goals"],3))
+  }
+  else{
+    projectdata[g,"ALast3GamesGoalsVSOpposition"] <- NA
+  }
+}
+
+
+
+#### HomeTeam Goals conceded in last 5 games regardless of opposition 
+### Home Goals
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTAG")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,HomeGame = rep(1,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTAG")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,HomeGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+projectdata$HLast5GamesGoalsConceded = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_goals[[home_team]][,"UtcDate"] < current_date &
+                   team_goals[[home_team]][,"HomeGame"] == 1)
+  
+  ## if the length of hinds is greater than or equal to 5, compute the mean.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HLast5GamesGoalsConceded"] <- mean(tail(team_goals[[home_team]][hinds,"Goals"],5))
+  }
+  else{
+    projectdata[g,"HLast5GamesGoalsConceded"] <- NA
+  }
+}
+
+###AwayTeam last 5 games goals conceded 
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","FTHG")]
+  colnames(tmp)[2] <- "Goals"
+  tmp <- cbind(tmp,AwayGame = rep(1,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","FTHG")]
+  colnames(tmp0)[2] <- "Goals"
+  tmp0 <- cbind(tmp0,AwayGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_goals[[tt]] <- tmp
+  
+}
+
+projectdata$ALast5GamesGoalsConceded = 0
+for(g in c(1:G)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_goals[[away_team]][,"UtcDate"] < current_date &
+                   team_goals[[away_team]][,"AwayGame"] == 1)
+  
+  ## if the length of hinds is greater than or equal to 5, compute the mean.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"ALast5GamesGoalsConceded"] <- mean(tail(team_goals[[away_team]][hinds,"Goals"],5))
+  }
+  else{
+    projectdata[g,"ALast5GamesGoalsConceded"] <- NA
+  }
+}
+
+### Calculate Form
+
+### HOME
+team_points <- vector(mode = "list",length=length(myteams))
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","Hpoints", "season")]
+  colnames(tmp)[2] <- "Points"
+  tmp <- cbind(tmp,HomeGame = rep(1,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","Apoints", "season")]
+  colnames(tmp0)[2] <- "Points"
+  tmp0 <- cbind(tmp0,HomeGame = rep(0,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_points[[tt]] <- tmp
+  
+}
+
+#THIS HAS TO BE DONE SEASON BY SEASON
+projectdata$HForm = 0
+for(g in c(1:380)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "09/10")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+for(g in c(381:760)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "10/11")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(761:1140)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "11/12")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(1141:1520)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                 team_points[[home_team]][,"season"] == "12/13")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(1521:1900)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "13/14")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(1901:2280)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "14/15")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(2281:2660)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "15/16")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(2661:3040)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "16/17")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(3041:3420)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "17/18")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+
+for(g in c(3421:3800)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  home_team <- match(projectdata[g,"HomeTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[home_team]][,"UtcDate"] < current_date &
+                   team_points[[home_team]][,"HomeGame"] == 1 & 
+                   team_points[[home_team]][,"season"] == "18/19")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"HForm"] <- sum(tail(team_points[[home_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"HForm"] <- NA
+  }
+}
+
+### AWAY
+team_points <- vector(mode = "list",length=length(myteams))
+for (tt in c(1:length(myteams))){
+  
+  ## home games
+  inds <- which(projectdata[,"HomeTeam"] == myteams[tt])
+  tmp <- projectdata[inds,c("UtcDate","Hpoints", "season")]
+  colnames(tmp)[2] <- "Points"
+  tmp <- cbind(tmp,AwayGame = rep(0,length(inds)))
+  
+  ## away games
+  inds <- which(projectdata[,"AwayTeam"] == myteams[tt])
+  tmp0 <- projectdata[inds,c("UtcDate","Apoints", "season")]
+  colnames(tmp0)[2] <- "Points"
+  tmp0 <- cbind(tmp0,AwayGame = rep(1,length(inds)))
+  
+  ## combine them
+  tmp <- rbind(tmp,tmp0)
+  tmp <- tmp[order(tmp[,"UtcDate"],decreasing = F),]
+  
+  ## store it in the list
+  team_points[[tt]] <- tmp
+  
+}
+#AGAIN SEASON BY SEASON
+projectdata$AForm = 0
+for(g in c(1:380)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 & 
+                   team_points[[away_team]][,"season"] == "09/10")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+for(g in c(381:760)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 & 
+                   team_points[[away_team]][,"season"] == "10/11")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+
+for(g in c(761:1140)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 &
+                   team_points[[away_team]][,"season"] == "11/12")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+
+for(g in c(1141:1520)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 &
+                   team_points[[away_team]][,"season"] == "12/13")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+for(g in c(1521:1900)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 &
+                   team_points[[away_team]][,"season"] == "13/14")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+for(g in c(1901:2280)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 & 
+                   team_points[[away_team]][,"season"] == "14/15")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+
+for(g in c(2281:2660)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 & 
+                   team_points[[away_team]][,"season"] == "15/16")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+
+for(g in c(2661:3040)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 & 
+                   team_points[[away_team]][,"season"] == "16/17")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+for(g in c(3041:3420)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 &
+                   team_points[[away_team]][,"season"] == "17/18")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+
+for(g in c(3421:3800)) { 
+  ## let's go step by step
+  ## get the last five home games
+  current_date <- projectdata[g,"UtcDate"]
+  away_team <- match(projectdata[g,"AwayTeam"],myteams)
+  
+  ## get the indices in our list for home games played before the current date
+  hinds <- which(team_points[[away_team]][,"UtcDate"] < current_date &
+                   team_points[[away_team]][,"AwayGame"] == 1 &
+                   team_points[[away_team]][,"season"] == "18/19")
+  
+  ## if the length of hinds is greater than or equal to 5, compute the sum.  Otherwise use NA
+  if(length(hinds) >= 5){
+    projectdata[g,"AForm"] <- sum(tail(team_points[[away_team]][hinds,"Points"],5))
+  }
+  else{
+    projectdata[g,"AForm"] <- NA
+  }
+}
+
+#MODELS
+
+set.seed(310)
+
+projectdata_train = projectdata[1:3040,]
+projectdata_test = projectdata[3041:3800,]
+ 
+
+
+colnames(projectdata)
+
+### Tree Home 
+homegoals_tree = rpart(FTHG ~ HLast5GamesGoals + ALast5GamesGoals + HLast3GamesGoalsVSOpposition + 
+                         ALast3GamesGoalsVSOpposition + HLast5GamesGoalsConceded + ALast5GamesGoalsConceded + 
+                         HForm + AForm + HTop6 + ATop6, data = projectdata_train) 
+
+
+
+plot(homegoals_tree,uniform=TRUE,
+     main="Regression Tree for Home Goals",branch=.005)
+text(homegoals_tree, use.n=TRUE, all=TRUE, cex=.75)
+
+mypreds_homegoals_tree <- predict(homegoals_tree,newdata = projectdata_test,type="vector", interval = "prediction")
+mse_tree = sum((mypreds_homegoals_tree - projectdata_test[,"FTHG"])^2)/sum((projectdata_test[,"FTHG"] - mean(projectdata_test[,"FTHG"]))^2)
+mse_tree #0.84 MSE FOR THE HOME TREE
+
+
+#rpart.plot(pruned_tree)
+rpart.plot(homegoals_tree) #NICER WAY TO DRAW TREE
+
+
+### Tree Away 
+awaygoals_tree = rpart(FTAG ~ HLast5GamesGoals + ALast5GamesGoals + HLast3GamesGoalsVSOpposition + 
+                         ALast3GamesGoalsVSOpposition + HLast5GamesGoalsConceded + ALast5GamesGoalsConceded + 
+                         HForm + AForm + HTop6 + ATop6, data = projectdata_train) 
+plot(awaygoals_tree,uniform=TRUE,
+     main="Regression Tree for Home Goals",branch=.005)
+text(awaygoals_tree, use.n=TRUE, all=TRUE, cex=.75)
+mypreds_awaygoals_tree <- predict(awaygoals_tree,newdata = projectdata_test,type="vector", interval = "prediction")
+mse_Atree = sum((mypreds_awaygoals_tree - projectdata_test[,"FTAG"])^2)/sum((projectdata_test[,"FTAG"] - mean(projectdata_test[,"FTAG"]))^2)
+mse_Atree #0.86 MSE AWAY TREE
+
+#predict goals from the tree
+projectdata_test$HomeGoalsPredictionTree = round(predict(homegoals_tree,newdata = projectdata_test,type="vector", interval = "prediction"),2)
+projectdata_test$AwayGoalsPredictionTree = round(predict(awaygoals_tree,newdata = projectdata_test,type="vector", interval = "prediction"),2)
+
+View(projectdata_test)
+
+### Poisson Regression 
+### have to remove NA's 
+projectdata_na_train = na.omit(projectdata)
+projectdata_na_test = na.omit(projectdata_test)
+nrow(projectdata)
+##3800
+nrow(projectdata_na_train)
+##1017
+nrow(projectdata_na_test)
+###338
+homegoals_reg = glm(formula = FTHG ~ HLast5GamesGoals + ALast5GamesGoals + HLast3GamesGoalsVSOpposition + 
+                      ALast3GamesGoalsVSOpposition + HLast5GamesGoalsConceded + ALast5GamesGoalsConceded + 
+                      HForm + AForm + HTop6 + ATop6, data = projectdata_na_train, family = poisson)
+summary(homegoals_reg)
+mypreds_homegoals_reg <- predict(homegoals_reg,newdata = projectdata_na_test,type="response", interval = "prediction")
+mypreds_homegoals_reg
+
+
+## compute mse 
+mse_reg1 <- sum((mypreds_homegoals_reg - projectdata_na_test[,"FTHG"])^2)/ 
+  sum((projectdata_na_test[,"FTHG"] - mean(projectdata_na_test[,"FTHG"]))^2)
+mse_reg1 #0.82 mse home goals reg
+
+projectdata_na_test$HomeGoalsPredictionReg = round(mypreds_homegoals_reg, 0)
+#View(projectdata_na_test)
+
+awaygoals_reg = glm(formula = FTAG ~ HLast5GamesGoals + ALast5GamesGoals + HLast3GamesGoalsVSOpposition + 
+                      ALast3GamesGoalsVSOpposition + HLast5GamesGoalsConceded + ALast5GamesGoalsConceded + 
+                      HForm + AForm + HTop6 + ATop6, data = projectdata_na_train, family = poisson)
+summary(awaygoals_reg)
+mypreds_awaygoals_reg <- predict(awaygoals_reg,newdata = projectdata_na_test,type="response", interval = "prediction")
+mypreds_awaygoals_reg
+mse_reg2 = sum((mypreds_awaygoals_reg - projectdata_na_test[,"FTAG"])^2)/ 
+  sum((projectdata_na_test[,"FTAG"] - mean(projectdata_na_test[,"FTAG"]))^2)
+mse_reg2 #0.94 mse away goals reg
+
+projectdata_na_test$AwayGoalsPredictionReg = round(mypreds_awaygoals_reg, 0)
+View(projectdata_na_test)
+
+
+#Decided I like the Poisson Regression better
+#the tree only gives 4 potential scores, but the regression gives more variability 
+
+#write.csv(projectdata_na_test, "~/Desktop/SFU classes/Stat 310/project /FinalStat310ProjectDataJuly2020.csv")
+
+# assess predictions of match results
+
+#predicteddata = read.csv("~/Desktop/SFU classes/Stat 310/project /FinalStat310ProjectDataJuly2020.csv")
+View(predicteddata)
+nrow(predicteddata)
+predicteddata$mypreds_result = ifelse(predicteddata$HomeGoalsPredictionReg>predicteddata$AwayGoalsPredictionReg, "H", ifelse(predicteddata$HomeGoalsPredictionReg == predicteddata$AwayGoalsPredictionReg, "D", "A"))
+result <- table(predicteddata$Result, predicteddata$mypreds_result)
+result
+print(paste("Accuracy: ",100*(sum(diag(result))/sum(result)),"%",sep=""))
+#54% accuracy
